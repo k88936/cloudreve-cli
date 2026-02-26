@@ -40,7 +40,7 @@ function App() {
   return (
     <Suspense fallback={<LoadingFallback />}>
       <ThemeProvider theme={theme}>
-        <CssBaseline />
+        <CssBaseline enableColorScheme />
         <HashRouter>
           <Routes>
             <Route path="/add-drive" element={<AddDrive />} />
