@@ -437,7 +437,14 @@ impl Client {
         let response_text = response.text().await?;
 
         // First parse as a generic Value to check the error code
-        let raw_value: serde_json::Value = serde_json::from_str(&response_text)?;
+        let raw_value: serde_json::Value = match serde_json::from_str(&response_text) {
+            Ok(v) => v,
+            Err(e) => {
+                // Include first 200 chars of response in error for debugging
+                let preview: String = response_text.chars().take(200).collect();
+                return Err(ApiError::Other(format!("JSON error: {} (response: {})", e, preview)));
+            }
+        };
 
         let code = raw_value.get("code").and_then(|c| c.as_i64()).unwrap_or(0) as i32;
 

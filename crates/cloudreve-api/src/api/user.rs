@@ -51,7 +51,7 @@ impl UserApi for Client {
         };
         
         self.post(
-            "/session/login",
+            "/session/token",
             &request,
             RequestOptions::new().no_credential(),
         ).await
