@@ -1,11 +1,12 @@
 use crate::config;
 use crate::uploader::{ProgressCallback, ProgressUpdate, Uploader, UploaderConfig, UploadParams};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use cloudreve_api::{Client, ClientConfig};
 use cloudreve_api::api::user::UserApi;
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::iter;
 use walkdir::WalkDir;
 
 pub async fn run(
@@ -40,28 +41,20 @@ pub async fn run(
 
     let normalized_remote = normalize_remote_path(remote_path);
 
-    let upload_items = collect_upload_items(files, recursive, &normalized_remote)?;
-
-    if upload_items.is_empty() {
-        bail!("No files to upload");
-    }
-
-    println!("Uploading {} file(s) to {}...", upload_items.len(), normalized_remote);
+    let upload_items = create_upload_stream(files, recursive, &normalized_remote);
 
     let multi_progress = Arc::new(MultiProgress::new());
 
     let style = ProgressStyle::with_template(
         "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}"
-    )
-    .unwrap()
+    )?
     .progress_chars("#>-");
 
-    let mut tasks = Vec::new();
+    let mut success_count = 0;
+    let mut fail_count = 0;
 
-    for (local_path, remote_uri) in upload_items {
-        let local_path_clone = local_path.clone();
-        let remote_uri_clone = remote_uri.clone();
-        let uploader_ref = &uploader;
+    for item_result in upload_items {
+        let (local_path, remote_uri) = item_result?;
 
         let pb = multi_progress.add(ProgressBar::new(0));
         pb.set_style(style.clone());
@@ -69,26 +62,14 @@ pub async fn run(
 
         let progress = ProgressBarCallback { pb: pb.clone() };
 
-        tasks.push(async move {
-            upload_file(uploader_ref, &local_path_clone, &remote_uri_clone, overwrite, progress).await
-        });
-    }
-
-    let mut success_count = 0;
-    let mut fail_count = 0;
-
-    for (idx, task) in tasks.into_iter().enumerate() {
-        let file_name = files.get(idx)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "?".to_string());
-        match task.await {
+        match upload_file(&uploader, &local_path, &remote_uri, overwrite, progress).await {
             Ok(()) => {
                 success_count += 1;
-                println!("✓ Uploaded: {}", file_name);
+                println!("✓ Uploaded: {}", local_path.display());
             }
             Err(e) => {
                 fail_count += 1;
-                eprintln!("✗ Failed: {} - {}", file_name, e);
+                eprintln!("✗ Failed: {} - {}", local_path.display(), e);
             }
         }
     }
@@ -108,37 +89,45 @@ fn normalize_remote_path(remote_path: &str) -> String {
     }
 }
 
-fn collect_upload_items(
-    files: &[PathBuf],
+fn create_upload_stream<'a>(
+    files: &'a [PathBuf],
     recursive: bool,
-    base_remote_path: &str,
-) -> Result<Vec<(PathBuf, String)>> {
-    let mut items = Vec::new();
-
-    for file in files {
+    base_remote_path: &'a str,
+) -> impl Iterator<Item = Result<(PathBuf, String)>> + 'a {
+    files.iter().flat_map(move |file| {
         if file.is_dir() {
             if !recursive {
-                bail!("{} is a directory, use -r for recursive upload", file.display());
-            }
-
-            for entry in WalkDir::new(file).into_iter().filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_file() {
-                    let relative = path.strip_prefix(file).context("Failed to compute relative path")?;
-                    let remote_uri = format!("{}/{}", base_remote_path.trim_end_matches('/'), relative.to_string_lossy());
-                    items.push((path.to_path_buf(), remote_uri));
-                }
+                Box::new(iter::once(Err(anyhow::anyhow!("{} is a directory, use -r for recursive upload", file.display())))) as Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a>
+            } else {
+                Box::new(
+                    WalkDir::new(file)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
+                        .filter(|entry| entry.path().is_file())
+                        .map(move |entry| {
+                            let path = entry.path();
+                            let relative = path.strip_prefix(file)
+                                .context("Failed to compute relative path")?;
+                            let remote_uri = format!("{}/{}", base_remote_path.trim_end_matches('/'), relative.to_string_lossy());
+                            Ok((path.to_path_buf(), remote_uri))
+                        }),
+                ) as Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a>
             }
         } else if file.is_file() {
-            let file_name = file.file_name().context("File has no name")?;
-            let remote_uri = format!("{}/{}", base_remote_path.trim_end_matches('/'), file_name.to_string_lossy());
-            items.push((file.clone(), remote_uri));
+            let file_name = file.file_name()
+                .context("File has no name")
+                .map(|name| name.to_string_lossy().to_string());
+            match file_name {
+                Ok(name) => {
+                    let remote_uri = format!("{}/{}", base_remote_path.trim_end_matches('/'), name);
+                    Box::new(iter::once(Ok((file.clone(), remote_uri)))) as Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a>
+                }
+                Err(e) => Box::new(iter::once(Err(e))) as Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a>
+            }
         } else {
-            bail!("File not found: {}", file.display());
+            Box::new(iter::once(Err(anyhow::anyhow!("File not found: {}", file.display())))) as Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a>
         }
-    }
-
-    Ok(items)
+    })
 }
 
 async fn upload_file(
