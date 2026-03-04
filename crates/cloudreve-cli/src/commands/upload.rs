@@ -10,8 +10,8 @@ use std::iter;
 use walkdir::WalkDir;
 
 pub async fn run(
-    remote_path: &str,
-    files: &[PathBuf],
+    local: &PathBuf,
+    remote: &str,
     recursive: bool,
     overwrite: bool,
     _concurrency: usize,
@@ -39,9 +39,9 @@ pub async fn run(
     let uploader_config = UploaderConfig::default();
     let uploader = Uploader::new(Arc::clone(&client), uploader_config);
 
-    let normalized_remote = normalize_remote_path(remote_path);
+    let normalized_remote = normalize_remote_path(remote);
 
-    let upload_items = create_upload_stream(files, recursive, &normalized_remote);
+    let upload_items = create_upload_stream(local, recursive, &normalized_remote);
 
     let multi_progress = Arc::new(MultiProgress::new());
 
@@ -90,44 +90,42 @@ fn normalize_remote_path(remote_path: &str) -> String {
 }
 
 fn create_upload_stream<'a>(
-    files: &'a [PathBuf],
+    local: &'a PathBuf,
     recursive: bool,
     base_remote_path: &'a str,
-) -> impl Iterator<Item = Result<(PathBuf, String)>> + 'a {
-    files.iter().flat_map(move |file| {
-        if file.is_dir() {
-            if !recursive {
-                Box::new(iter::once(Err(anyhow::anyhow!("{} is a directory, use -r for recursive upload", file.display())))) as Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a>
-            } else {
-                Box::new(
-                    WalkDir::new(file)
-                        .into_iter()
-                        .filter_map(|e| e.ok())
-                        .filter(|entry| entry.path().is_file())
-                        .map(move |entry| {
-                            let path = entry.path();
-                            let relative = path.strip_prefix(file)
-                                .context("Failed to compute relative path")?;
-                            let remote_uri = format!("{}/{}", base_remote_path.trim_end_matches('/'), relative.to_string_lossy());
-                            Ok((path.to_path_buf(), remote_uri))
-                        }),
-                ) as Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a>
-            }
-        } else if file.is_file() {
-            let file_name = file.file_name()
-                .context("File has no name")
-                .map(|name| name.to_string_lossy().to_string());
-            match file_name {
-                Ok(name) => {
-                    let remote_uri = format!("{}/{}", base_remote_path.trim_end_matches('/'), name);
-                    Box::new(iter::once(Ok((file.clone(), remote_uri)))) as Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a>
-                }
-                Err(e) => Box::new(iter::once(Err(e))) as Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a>
-            }
+) -> Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a> {
+    if local.is_dir() {
+        if !recursive {
+            Box::new(iter::once(Err(anyhow::anyhow!("{} is a directory, use -r for recursive upload", local.display()))))
         } else {
-            Box::new(iter::once(Err(anyhow::anyhow!("File not found: {}", file.display())))) as Box<dyn Iterator<Item = Result<(PathBuf, String)>> + 'a>
+            Box::new(
+                WalkDir::new(local)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|entry| entry.path().is_file())
+                    .map(move |entry| {
+                        let path = entry.path();
+                        let relative = path.strip_prefix(local)
+                            .context("Failed to compute relative path")?;
+                        let remote_uri = format!("{}/{}", base_remote_path.trim_end_matches('/'), relative.to_string_lossy());
+                        Ok((path.to_path_buf(), remote_uri))
+                    }),
+            )
         }
-    })
+    } else if local.is_file() {
+        let file_name = local.file_name()
+            .context("File has no name")
+            .map(|name| name.to_string_lossy().to_string());
+        match file_name {
+            Ok(name) => {
+                let remote_uri = format!("{}/{}", base_remote_path.trim_end_matches('/'), name);
+                Box::new(iter::once(Ok((local.clone(), remote_uri))))
+            }
+            Err(e) => Box::new(iter::once(Err(e)))
+        }
+    } else {
+        Box::new(iter::once(Err(anyhow::anyhow!("File not found: {}", local.display()))))
+    }
 }
 
 async fn upload_file(

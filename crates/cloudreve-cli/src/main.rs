@@ -24,8 +24,8 @@ enum Commands {
         password: String,
     },
     Upload {
-        remote_path: String,
-        files: Vec<PathBuf>,
+        local: PathBuf,
+        remote: String,
         #[arg(short, long)]
         recursive: bool,
         #[arg(long)]
@@ -48,13 +48,13 @@ async fn main() -> anyhow::Result<()> {
             commands::login::run(&server, &email, &password).await?;
         }
         Commands::Upload {
-            remote_path,
-            files,
+            local,
+            remote,
             recursive,
             overwrite,
             concurrency,
         } => {
-            commands::upload::run(&remote_path, &files, recursive, overwrite, concurrency).await?;
+            commands::upload::run(&local, &remote, recursive, overwrite, concurrency).await?;
         }
     }
 
